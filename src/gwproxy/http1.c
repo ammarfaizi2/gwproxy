@@ -305,8 +305,17 @@ static int parse_hdr_req_first_line(struct gwnet_http_hdr_pctx *ctx,
 		/*
 		 * If we find a question mark, start assigning the
 		 * the query string.
+		 *
+		 * Only the FIRST one delimits it (RFC 3986 Section 3.4): every
+		 * later '?' is an ordinary query character, already counted
+		 * into @qs_len above. Acting on those too would rewind @path_len
+		 * once per '?' even though only the first was ever added to it,
+		 * underflowing this unsigned counter on a target with more
+		 * trailing '?' than leading path characters -- "GET /???" is
+		 * enough -- and would leave @qs pointing past the last '?'
+		 * while @qs_len still measures from the first.
 		 */
-		if (c == '?') {
+		if (c == '?' && !qs) {
 			qs = &buf[off];
 			path_len--;
 		}
@@ -1535,6 +1544,46 @@ static void test_req_hdr_query_string_empty(void)
 	PRTEST_OK();
 }
 
+/*
+ * Only the first '?' delimits the query string; the rest are ordinary query
+ * characters. Getting that wrong used to rewind the unsigned path length once
+ * per '?' and underflow it, so these targets are the boundary: "/??" leaves it
+ * at zero, "/???" is the first that wraps, and an empty path with a trailing
+ * '?' wraps immediately.
+ */
+static void test_req_hdr_query_string_multi_qmark(void)
+{
+	static const struct {
+		const char *req, *uri, *path, *qs;
+	} cases[] = {
+		{ "GET /?? HTTP/1.1\r\nHost: e\r\n\r\n",	"/??",	"/",	"?" },
+		{ "GET /??? HTTP/1.1\r\nHost: e\r\n\r\n",	"/???",	"/",	"??" },
+		{ "GET /a?b?c HTTP/1.1\r\nHost: e\r\n\r\n",	"/a?b?c", "/a",	"b?c" },
+		{ "OPTIONS ?? HTTP/1.1\r\nHost: e\r\n\r\n",	"??",	"",	"?" },
+	};
+	static const size_t nr = sizeof(cases) / sizeof(cases[0]);
+	struct gwnet_http_hdr_pctx ctx;
+	struct gwnet_http_req_hdr hdr;
+	size_t i;
+	int r;
+
+	for (i = 0; i < nr; i++) {
+		r = gwnet_http_hdr_pctx_init(&ctx);
+		assert(!r);
+		ctx.buf = cases[i].req;
+		ctx.len = strlen(cases[i].req);
+		r = gwnet_http_req_hdr_parse(&ctx, &hdr);
+		assert(!r);
+		assert(ctx.state == GWNET_HTTP_HDR_PARSE_ST_DONE);
+		assert(!strcmp(hdr.uri, cases[i].uri));
+		assert(!strcmp(hdr.path, cases[i].path));
+		assert(!strcmp(hdr.qs, cases[i].qs));
+		gwnet_http_req_hdr_free(&hdr);
+		gwnet_http_hdr_pctx_free(&ctx);
+	}
+	PRTEST_OK();
+}
+
 static void test_req_hdr_invalid_req_line_sp(void)
 {
 	static const char buf[] =
@@ -2689,6 +2738,7 @@ void gwnet_http_run_tests(void)
 		test_res_hdr_simple();
 		test_req_hdr_query_string();
 		test_req_hdr_query_string_empty();
+		test_req_hdr_query_string_multi_qmark();
 		test_req_hdr_invalid_req_line_sp();
 		test_req_hdr_invalid_res_status_line_sp();
 		test_req_hdr_invalid_uri_chars();
