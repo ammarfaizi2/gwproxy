@@ -2033,6 +2033,19 @@ static int handle_conn_state_prot(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 		return r;
 
 	ct = gcp->conn_state;
+	if (ct == CONN_STATE_PROT) {
+		/*
+		 * Still undecided, so no state machine owns this connection
+		 * yet and the ranges below do not describe it. It happens
+		 * whenever every enabled front-end rejected the bytes: with
+		 * only one of --as-socks5/--as-http on there is no fallback
+		 * left, so gwp_handle_conn_state_prot() hands back -EINVAL
+		 * with the state untouched. Report that rather than treating
+		 * it as an impossible state -- it is ordinary garbage input,
+		 * and asserting on it lets any client abort the process.
+		 */
+		return r < 0 ? r : -EINVAL;
+	}
 	if (CONN_STATE_HTTP_MIN < ct && ct < CONN_STATE_HTTP_MAX) {
 		assert(w->ctx->cfg.as_http);
 		return chk_http(w, gcp, r);
