@@ -3117,6 +3117,21 @@ int gwp_handle_conn_state_socks5(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 		r = gwp_socks5_handle_data(gcp);
 		if (r)
 			return r;
+	} else if (ct == CONN_STATE_SOCKS5_DNS_QUERY ||
+		   ct == CONN_STATE_SOCKS5_CONNECT) {
+		/*
+		 * The request is parsed; we are waiting on the resolver or on
+		 * connect(), and the client is still armed for input because
+		 * arm_poll_for_dns_query() only adds the resolver's eventfd.
+		 * A client that pipelines data behind its request therefore
+		 * arrives here, which is rude rather than impossible -- it
+		 * used to abort the process.
+		 *
+		 * There is nothing to parse yet, so leave the bytes buffered:
+		 * once the target is up, forwarding sends them on, which is
+		 * what the client was banking on.
+		 */
+		return -EAGAIN;
 	} else {
 		assert(0 && "Invalid SOCKS5 connection state");
 		return -EINVAL;
@@ -3233,6 +3248,10 @@ int gwp_handle_conn_state_http(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 		 */
 		gcp->prot_type = GWP_PROT_TYPE_HTTP;
 		gcp->conn_state = CONN_STATE_HTTP_HDR;
+	} else if (gcp->conn_state == CONN_STATE_HTTP_DNS_QUERY ||
+		   gcp->conn_state == CONN_STATE_HTTP_CONNECT) {
+		/* Pipelined behind the request; see the SOCKS5 side. */
+		return -EAGAIN;
 	} else if (gcp->conn_state != CONN_STATE_HTTP_HDR) {
 		assert(0 && "Invalid HTTP connection state");
 		return -EINVAL;
