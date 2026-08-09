@@ -11,11 +11,15 @@
 #   METHOD=NN  the greeting was answered with an unacceptable method (no request sent)
 #
 # Usage: socks5_probe.py [--host H] [--cmd N] [--atyp ipv4|ipv6|domain]
-#                        [--dst D] [--user U] [--pass P] port dst_port
+#                        [--dst D] [--user U] [--pass P] [--split] port dst_port
+#
+# --split writes the greeting one byte at a time, pausing between them, so it
+# lands in separate TCP segments. A proxy must wait for the rest rather than
+# decide the protocol on a partial greeting.
 #
 # --cmd defaults to 1 (CONNECT); pass 2 for BIND or 3 for UDP ASSOCIATE to
 # check the "command not supported" path.
-import socket, struct, sys
+import socket, struct, sys, time
 
 argv = sys.argv[1:]
 
@@ -35,6 +39,9 @@ atyp = take_opt('--atyp', 'ipv4')
 dst = take_opt('--dst', '127.0.0.1')
 user = take_opt('--user')
 password = take_opt('--pass')
+split = '--split' in argv
+if split:
+    argv.remove('--split')
 
 port = int(argv[0])
 dport = int(argv[1])
@@ -44,10 +51,13 @@ s = socket.socket(fam, socket.SOCK_STREAM)
 s.settimeout(10)
 s.connect((host, port))
 
-if user is not None:
-    s.sendall(b'\x05\x02\x00\x02')
+greeting = b'\x05\x02\x00\x02' if user is not None else b'\x05\x01\x00'
+if split:
+    for b in greeting:
+        s.sendall(bytes([b]))
+        time.sleep(0.05)
 else:
-    s.sendall(b'\x05\x01\x00')
+    s.sendall(greeting)
 sel = s.recv(2)
 if len(sel) < 2:
     print('CLOSED')
