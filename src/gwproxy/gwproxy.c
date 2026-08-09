@@ -2766,29 +2766,57 @@ static int handle_socks5_prot(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	struct gwp_ctx *ctx = w->ctx;
 	int r;
 
-	gcp->s5_conn = gwp_socks5_conn_alloc(ctx->socks5);
+	/*
+	 * Only on the first pass. The greeting need not arrive in one segment,
+	 * and a second allocation would leak the first and throw away the
+	 * parser state along with it.
+	 */
 	if (!gcp->s5_conn) {
-		pr_err(&ctx->lh, "Failed to allocate SOCKS5 connection");
-		return -ENOMEM;
+		gcp->s5_conn = gwp_socks5_conn_alloc(ctx->socks5);
+		if (!gcp->s5_conn) {
+			pr_err(&ctx->lh, "Failed to allocate SOCKS5 connection");
+			return -ENOMEM;
+		}
+		/*
+		 * Claim the connection as SOCKS5 now, exactly as the HTTP side
+		 * does: s5_conn and http_conn share a union, and gwp_free_conn_pair()
+		 * picks the member to free by prot_type. Leaving it NONE while
+		 * the greeting is still arriving means a teardown in that window
+		 * frees neither, which a client can repeat at will.
+		 */
+		gcp->prot_type = GWP_PROT_TYPE_SOCKS5;
 	}
 
 	r = gwp_socks5_handle_data(gcp);
 	if (r < 0) {
 		gwp_socks5_conn_free(gcp->s5_conn);
 		gcp->s5_conn = NULL;
+		/* Unclaim it, so an HTTP fallback can take the union over. */
+		gcp->prot_type = GWP_PROT_TYPE_NONE;
 		return r;
 	}
 
-	if (gcp->s5_conn->state != GWP_SOCKS5_ST_INIT) {
+	if (gcp->s5_conn->state == GWP_SOCKS5_ST_INIT) {
 		/*
-		 * This must be a SOCKS5 data connection, there is no
-		 * possibility to fallback to HTTP because the SOCKS5
-		 * parser already sees the SOCKS5 header.
+		 * The greeting is still incomplete, so the protocol remains
+		 * undecided -- the parser needs VER and NMETHODS before it can
+		 * even reject a non-SOCKS5 first byte, and it has consumed
+		 * nothing. Report that rather than success: gwp_socks5_handle_data()
+		 * folds the parser's -EAGAIN into 0 for its other caller, and
+		 * taking that 0 at face value here would leave the pair in
+		 * CONN_STATE_PROT while claiming the state machine had advanced.
+		 * epoll's dispatcher asserts on exactly that combination.
 		 */
-		gcp->conn_state = CONN_STATE_SOCKS5_DATA;
-		gcp->prot_type = GWP_PROT_TYPE_SOCKS5;
+		return -EAGAIN;
 	}
 
+	/*
+	 * This must be a SOCKS5 data connection, there is no possibility to
+	 * fallback to HTTP because the SOCKS5 parser already sees the SOCKS5
+	 * header.
+	 */
+	gcp->conn_state = CONN_STATE_SOCKS5_DATA;
+	gcp->prot_type = GWP_PROT_TYPE_SOCKS5;
 	return 0;
 }
 
